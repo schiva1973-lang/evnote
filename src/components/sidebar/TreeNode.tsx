@@ -77,7 +77,6 @@ const PageItem: React.FC<{
   return (
     <div
       ref={setNodeRef}
-      style={style}
       className={cn(
         "group/page flex items-center gap-2 px-2 py-0.5 my-0.5 rounded-sm cursor-pointer hover:bg-accent/50 text-sm transition-all relative",
         isSelected 
