@@ -4,10 +4,36 @@ import { Node } from '@/types'
 import TreeNode from './TreeNode'
 import { Loader2, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
 
 const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
   const [nodes, setNodes] = useState<Node[]>([])
   const [isLoading, setIsLoading] = useState(true)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 5,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  )
 
   useEffect(() => {
     fetchNodes()
@@ -39,6 +65,40 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
     }
   }
 
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+
+    const activeNode = nodes.find(n => n.id === active.id)
+    const overNode = nodes.find(n => n.id === over.id)
+    
+    if (!activeNode || !overNode) return
+
+    // Only allow sorting within the same parent
+    if (activeNode.parent_node_id !== overNode.parent_node_id) return
+
+    const oldIndex = nodes.findIndex((n) => n.id === active.id)
+    const newIndex = nodes.findIndex((n) => n.id === over.id)
+
+    const newNodes = arrayMove(nodes, oldIndex, newIndex)
+    setNodes(newNodes)
+
+    // Update sort_order in database
+    const updates = newNodes
+      .filter(n => n.parent_node_id === activeNode.parent_node_id)
+      .map((node, index) => ({
+        id: node.id,
+        sort_order: index,
+      }))
+
+    for (const update of updates) {
+      await supabase
+        .from('nodes')
+        .update({ sort_order: update.sort_order })
+        .eq('id', update.id)
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="flex justify-center p-4">
@@ -64,15 +124,26 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
           노드가 없습니다.
         </div>
       ) : (
-        rootNodes.map(node => (
-          <TreeNode 
-            key={node.id} 
-            node={node} 
-            allNodes={nodes} 
-            depth={0} 
-            onUpdate={fetchNodes}
-          />
-        ))
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleDragEnd}
+        >
+          <SortableContext
+            items={rootNodes.map(n => n.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            {rootNodes.map(node => (
+              <TreeNode 
+                key={node.id} 
+                node={node} 
+                allNodes={nodes} 
+                depth={0} 
+                onUpdate={fetchNodes}
+              />
+            ))}
+          </SortableContext>
+        </DndContext>
       )}
     </div>
   )

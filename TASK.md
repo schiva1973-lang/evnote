@@ -18,7 +18,7 @@
 - [x] 일반 노트와 트리 노트 유형 구분 및 목록 표시
 - [x] 트리 노드(Node) 계층 구조 구현 (Recursive Component)
 - [x] 트리 깊이(Tree Depth) 6단계 제한 로직 적용
-- [ ] 노드 간 드래그 앤 드롭(Drag & Drop) 이동 구현
+- [x] 노드 간 드래그 앤 드롭(Drag & Drop) 이동 구현
 - [x] 노드 내 페이지(Page) 추가 및 순서 변경 기능
 
 ## 4단계: Fabric.js 기반 캔버스 엔진 (Canvas)
@@ -33,11 +33,19 @@
 ## 5단계: 데이터 저장 및 동기화 (Persistence)
 - [x] 캔버스 데이터(JSON) 직렬화 및 역직렬화 로직
 - [x] **Debounced Auto-save** 기능을 통한 Supabase DB 자동 저장
-- [ ] 이미지 업로드 및 Supabase Storage 연동
+- [x] 이미지 업로드 및 Supabase Storage 연동
 - [x] 페이지 전환 시 데이터 로딩 및 캐싱 최적화
 
 ## 6단계: UI 고도화 및 배포 (Final Polish)
 - [x] 전체 UI/UX 디자인 디테일 수정 (다크 모드 지원 등)
-- [ ] 태블릿 환경 최적화 및 터치 이벤트 최종 점검
-- [ ] Vercel을 통한 프로덕션 배포
-- [ ] 최종 테스트 및 버그 수정
+- [x] 태블릿 환경 최적화 및 터치 이벤트 최종 점검
+- [x] Vercel을 통한 프로덕션 배포 설정 완료
+- [x] 최종 테스트 및 버그 수정 완료
+
+---
+**EveryNote** 프로젝트 개발이 성공적으로 완료되었습니다.
+- 고성능 벡터 캔버스 엔진 (Fabric.js)
+- 계층적 트리 구조 관리
+- Supabase 실시간 동기화 및 이미지 업로드
+- 태블릿 환경 최적화 (Pinch Zoom, Pan, Palm Rejection)
+- 다크 모드 및 반응형 UI 지원

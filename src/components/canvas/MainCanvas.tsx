@@ -16,6 +16,8 @@ const MainCanvas: React.FC = () => {
   const isMouseDownRef = useRef(false)
   const eraserRectRef = useRef<fabric.Rect | null>(null)
   const startPointRef = useRef<{ x: number, y: number } | null>(null)
+  const lastTouchDistance = useRef<number | null>(null)
+  const isPanning = useRef(false)
   
   const { 
     activeTool, 
@@ -33,11 +35,6 @@ const MainCanvas: React.FC = () => {
     const canvas = fabricRef.current
     if (!canvas) return
 
-    if (backgroundType === 'blank') {
-      canvas.setBackgroundColor('#ffffff', canvas.renderAll.bind(canvas))
-      return
-    }
-
     const gridSize = 35 // Optimal size for note lines
 
     // Create a temporary canvas for the pattern
@@ -45,11 +42,19 @@ const MainCanvas: React.FC = () => {
     const ctx = patternCanvas.getContext('2d')
     if (!ctx) return
 
+    patternCanvas.width = gridSize
+    patternCanvas.height = gridSize
+
+    // Always fill background with white first
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, gridSize, gridSize)
+
+    if (backgroundType === 'blank') {
+      canvas.setBackgroundColor('#ffffff', canvas.renderAll.bind(canvas))
+      return
+    }
+
     if (backgroundType === 'lined') {
-      patternCanvas.width = gridSize
-      patternCanvas.height = gridSize
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, gridSize, gridSize)
       ctx.strokeStyle = 'rgba(0, 150, 255, 0.15)' // Light blue line
       ctx.lineWidth = 1
       ctx.beginPath()
@@ -57,18 +62,10 @@ const MainCanvas: React.FC = () => {
       ctx.lineTo(gridSize, gridSize)
       ctx.stroke()
     } else if (backgroundType === 'grid') {
-      patternCanvas.width = gridSize
-      patternCanvas.height = gridSize
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, gridSize, gridSize)
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)' // Very light gray grid
       ctx.lineWidth = 1
       ctx.strokeRect(0, 0, gridSize, gridSize)
     } else if (backgroundType === 'dot') {
-      patternCanvas.width = gridSize
-      patternCanvas.height = gridSize
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, gridSize, gridSize)
       ctx.fillStyle = 'rgba(0, 0, 0, 0.15)' // Light dot
       ctx.beginPath()
       ctx.arc(gridSize / 2, gridSize / 2, 1, 0, Math.PI * 2)
@@ -80,7 +77,9 @@ const MainCanvas: React.FC = () => {
       repeat: 'repeat'
     })
 
-    canvas.setBackgroundColor(pattern, canvas.renderAll.bind(canvas))
+    canvas.setBackgroundColor(pattern, () => {
+      canvas.renderAll()
+    })
   }, [backgroundType])
 
   // 1. Initialize Canvas (Run Once)
@@ -123,6 +122,18 @@ const MainCanvas: React.FC = () => {
       const isPenMode = useCanvasStore.getState().isPenMode
       const pointerType = (opt.e as any).pointerType || 'mouse'
       
+      // Multitouch check (Zoom/Pan)
+      const touches = (opt.e as any).touches
+      if (touches && touches.length === 2) {
+        isPanning.current = true
+        const dist = Math.hypot(
+          touches[0].clientX - touches[1].clientX,
+          touches[0].clientY - touches[1].clientY
+        )
+        lastTouchDistance.current = dist
+        return
+      }
+
       if (isPenMode && pointerType === 'touch') return
 
       isMouseDownRef.current = true
@@ -163,6 +174,39 @@ const MainCanvas: React.FC = () => {
     }
 
     const handleMouseMove = (opt: fabric.IEvent) => {
+      const touches = (opt.e as any).touches
+      
+      // Handle Multitouch Zoom/Pan
+      if (touches && touches.length === 2 && isPanning.current) {
+        const dist = Math.hypot(
+          touches[0].clientX - touches[1].clientX,
+          touches[0].clientY - touches[1].clientY
+        )
+        
+        if (lastTouchDistance.current) {
+          const delta = dist / lastTouchDistance.current
+          let newZoom = canvas.getZoom() * delta
+          
+          if (newZoom > 20) newZoom = 20
+          if (newZoom < 0.01) newZoom = 0.01
+          
+          const centerX = (touches[0].clientX + touches[1].clientX) / 2
+          const centerY = (touches[0].clientY + touches[1].clientY) / 2
+          
+          const offset = containerRef.current?.getBoundingClientRect()
+          if (offset) {
+            canvas.zoomToPoint({ 
+              x: centerX - offset.left, 
+              y: centerY - offset.top 
+            }, newZoom)
+            setZoom(newZoom)
+          }
+        }
+        
+        lastTouchDistance.current = dist
+        return
+      }
+
       const isActuallyDown = isMouseDownRef.current || ((opt.e as any).buttons > 0)
       if (!isActuallyDown) return
 
@@ -192,6 +236,9 @@ const MainCanvas: React.FC = () => {
     }
 
     const handleMouseUp = () => {
+      isPanning.current = false
+      lastTouchDistance.current = null
+
       if (activeTool === 'rectEraser') {
         const rect = eraserRectRef.current
         if (rect) {
@@ -256,6 +303,9 @@ const MainCanvas: React.FC = () => {
     if (!fabricRef.current || !currentPageId) return
 
     const loadPageData = async () => {
+      // Set white background immediately to avoid black flickering during load
+      fabricRef.current?.setBackgroundColor('#ffffff', fabricRef.current?.renderAll.bind(fabricRef.current))
+      
       const { data, error } = await supabase
         .from('pages')
         .select('canvas_data')
@@ -362,25 +412,46 @@ const MainCanvas: React.FC = () => {
     updateBackground()
   }, [updateBackground])
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !fabricRef.current) return
 
-    const reader = new FileReader()
-    reader.onload = (f) => {
-      const data = f.target?.result
-      if (typeof data !== 'string') return
-      
-      fabric.Image.fromURL(data, (img: any) => {
+    try {
+      // 1. Upload to Supabase Storage
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`
+      const filePath = `images/${fileName}`
+
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('canvas-assets')
+        .upload(filePath, file)
+
+      if (uploadError) throw uploadError
+
+      // 2. Get Public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('canvas-assets')
+        .getPublicUrl(filePath)
+
+      // 3. Add to Fabric Canvas
+      fabric.Image.fromURL(publicUrl, (img: any) => {
         img.scaleToWidth(300)
         fabricRef.current?.add(img)
         fabricRef.current?.centerObject(img)
         fabricRef.current?.setActiveObject(img)
         setActiveTool('select')
-      })
+        
+        // Trigger save
+        const json = fabricRef.current?.toJSON()
+        saveCanvasData(json)
+      }, { crossOrigin: 'anonymous' })
+      
+    } catch (error) {
+      console.error('Error uploading image:', error)
+      alert('이미지 업로드에 실패했습니다.')
+    } finally {
+      e.target.value = ''
     }
-    reader.readAsDataURL(file)
-    e.target.value = ''
   }
 
   return (
