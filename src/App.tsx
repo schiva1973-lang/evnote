@@ -4,10 +4,14 @@ import { useAuthStore } from '@/store/useAuthStore'
 import MainLayout from '@/components/layout/MainLayout'
 import AuthPage from '@/components/auth/AuthPage'
 import MainCanvas from '@/components/canvas/MainCanvas'
+import PageList from '@/components/page-list/PageList'
+import { useUIStore } from '@/store/useUIStore'
 import { Loader2 } from 'lucide-react'
 
 function App() {
   const { user, isLoading, setUser, setIsLoading } = useAuthStore()
+  const currentNodeId = useUIStore((state) => state.currentNodeId)
+  const currentPageId = useUIStore((state) => state.currentPageId)
 
   useEffect(() => {
     // 현재 세션 확인
@@ -38,7 +42,7 @@ function App() {
 
   return (
     <MainLayout>
-      <MainCanvas />
+      {currentNodeId && !currentPageId ? <PageList /> : <MainCanvas />}
     </MainLayout>
   )
 }

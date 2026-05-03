@@ -1,8 +1,15 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { useUIStore } from '@/store/useUIStore'
 import { useCanvasStore, ToolType, BackgroundType } from '@/store/useCanvasStore'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { supabase } from '@/lib/supabase'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { 
   Select, 
   SelectContent, 
@@ -19,21 +26,17 @@ import {
   Image as ImageIcon, 
   Square, 
   MousePointer2,
-  ZoomIn,
-  ZoomOut,
-  Smartphone,
   Layers
 } from 'lucide-react'
 
 const Header: React.FC = () => {
+  const [isBackgroundDialogOpen, setIsBackgroundDialogOpen] = useState(false)
+  const [pagePosition, setPagePosition] = useState<{ current: number; total: number } | null>(null)
   const toggleSidebar = useUIStore((state) => state.toggleSidebar)
+  const currentPageId = useUIStore((state) => state.currentPageId)
   const { 
     activeTool, 
     setActiveTool, 
-    zoom, 
-    setZoom, 
-    isPenMode, 
-    setIsPenMode,
     brushColor,
     setBrushColor,
     brushWidth,
@@ -51,6 +54,57 @@ const Header: React.FC = () => {
     { type: 'text', icon: <Type className="h-4 w-4" />, label: 'Text' },
     { type: 'image', icon: <ImageIcon className="h-4 w-4" />, label: 'Image' },
   ]
+
+  const backgroundOptions: { type: BackgroundType; label: string; preview: string }[] = [
+    { type: 'lined', label: '줄 노트', preview: 'bg-white bg-[linear-gradient(to_bottom,transparent_31px,rgba(0,122,255,0.45)_32px)] bg-[length:100%_32px]' },
+    { type: 'grid', label: '격자', preview: 'bg-white bg-[linear-gradient(rgba(0,0,0,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(0,0,0,0.18)_1px,transparent_1px)] bg-[length:18px_18px]' },
+    { type: 'dot', label: '점선', preview: 'bg-white bg-[radial-gradient(circle,rgba(0,0,0,0.38)_1px,transparent_1px)] bg-[length:18px_18px]' },
+    { type: 'blank', label: '빈 페이지', preview: 'bg-white' },
+  ]
+
+  useEffect(() => {
+    let isMounted = true
+
+    const loadPagePosition = async () => {
+      if (!currentPageId) {
+        setPagePosition(null)
+        return
+      }
+
+      const { data: currentPage, error: currentPageError } = await supabase
+        .from('pages')
+        .select('id, node_id')
+        .eq('id', currentPageId)
+        .single()
+
+      if (currentPageError || !currentPage) {
+        if (isMounted) setPagePosition(null)
+        return
+      }
+
+      const { data: pages, error: pagesError } = await supabase
+        .from('pages')
+        .select('id')
+        .eq('node_id', currentPage.node_id)
+        .order('sort_order', { ascending: true })
+
+      if (pagesError || !pages) {
+        if (isMounted) setPagePosition(null)
+        return
+      }
+
+      const pageIndex = pages.findIndex((page) => page.id === currentPageId)
+      if (isMounted) {
+        setPagePosition(pageIndex >= 0 ? { current: pageIndex + 1, total: pages.length } : null)
+      }
+    }
+
+    loadPagePosition()
+
+    return () => {
+      isMounted = false
+    }
+  }, [currentPageId])
 
   return (
     <header className="h-14 border-b flex items-center justify-between px-4 bg-background z-10">
@@ -104,44 +158,49 @@ const Header: React.FC = () => {
       </div>
 
       <div className="flex items-center gap-2">
-        <div className="flex items-center gap-2 mr-4 border-r pr-4">
-          <Layers className="h-4 w-4 text-muted-foreground" />
-          <Select value={backgroundType} onValueChange={(v: BackgroundType) => setBackgroundType(v)}>
-            <SelectTrigger className="w-28 h-8 text-xs">
-              <SelectValue placeholder="Background" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="lined">Lined Paper</SelectItem>
-              <SelectItem value="grid">Grid</SelectItem>
-              <SelectItem value="dot">Dot</SelectItem>
-              <SelectItem value="blank">Blank</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="flex items-center gap-1 mr-4">
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoom(Math.max(0.1, zoom - 0.1))}>
-            <ZoomOut className="h-4 w-4" />
-          </Button>
-          <span className="text-xs font-medium w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoom(Math.min(5, zoom + 0.1))}>
-            <ZoomIn className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <Button 
-          variant="outline" 
-          size="sm" 
-          className={cn(
-            "gap-2 transition-all duration-200",
-            isPenMode ? "border-green-500 border-2 text-green-600 shadow-sm bg-green-50/50" : "border-border text-muted-foreground"
-          )}
-          onClick={() => setIsPenMode(!isPenMode)}
+        {pagePosition && (
+          <span className="min-w-14 text-right text-sm font-medium text-muted-foreground">
+            ({pagePosition.current}/{pagePosition.total})
+          </span>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => setIsBackgroundDialogOpen(true)}
+          title="배경 선택"
         >
-          <Smartphone className={cn("h-4 w-4", isPenMode && "text-green-600")} />
-          <span className="font-bold">PEN MODE</span>
+          <Layers className="h-4 w-4" />
         </Button>
       </div>
+
+      <Dialog open={isBackgroundDialogOpen} onOpenChange={setIsBackgroundDialogOpen}>
+        <DialogContent className="max-w-md border bg-white text-foreground shadow-2xl">
+          <DialogHeader>
+            <DialogTitle>배경 선택</DialogTitle>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3 pt-2">
+            {backgroundOptions.map((option) => (
+              <Button
+                key={option.type}
+                type="button"
+                variant="outline"
+                className={cn(
+                  "h-auto flex-col items-stretch gap-3 p-3",
+                  backgroundType === option.type && "border-primary ring-2 ring-primary/30"
+                )}
+                onClick={() => {
+                  setBackgroundType(option.type)
+                  setIsBackgroundDialogOpen(false)
+                }}
+              >
+                <span className={cn("h-20 rounded-md border border-slate-300 shadow-inner", option.preview)} />
+                <span className="text-sm font-medium">{option.label}</span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </header>
   )
 }

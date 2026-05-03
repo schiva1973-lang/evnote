@@ -5,6 +5,37 @@ import { useUIStore } from '@/store/useUIStore'
 import { supabase } from '@/lib/supabase'
 import debounce from 'lodash.debounce'
 
+const STYLUS_ONLY_TOOLS = new Set(['pen', 'highlighter', 'eraser'])
+const ZOOM_DISTANCE_THRESHOLD = 12
+const SWIPE_DISTANCE_THRESHOLD = 80
+const SWIPE_VERTICAL_TOLERANCE = 40
+const SWIPE_MAX_DISTANCE_DELTA = 15
+
+const requiresStylusInput = (tool: string) => STYLUS_ONLY_TOOLS.has(tool)
+
+const getPointerType = (event: Event) => {
+  const pointerEvent = event as PointerEvent
+  if (pointerEvent.pointerType) return pointerEvent.pointerType
+  if ('touches' in event) return 'touch'
+  return 'mouse'
+}
+
+const isStylusInput = (event: Event) => getPointerType(event) === 'pen'
+
+type TouchPoint = { x: number; y: number }
+type TouchGestureMode = 'undecided' | 'zoom' | 'page-swipe'
+
+const getTouchDistance = (points: TouchPoint[]) => {
+  if (points.length < 2) return null
+
+  return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+}
+
+const getTouchCenter = (points: TouchPoint[]) => ({
+  x: (points[0].x + points[1].x) / 2,
+  y: (points[0].y + points[1].y) / 2,
+})
+
 const MainCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fabricRef = useRef<fabric.Canvas | null>(null)
@@ -17,6 +48,12 @@ const MainCanvas: React.FC = () => {
   const eraserRectRef = useRef<fabric.Rect | null>(null)
   const startPointRef = useRef<{ x: number, y: number } | null>(null)
   const lastTouchDistance = useRef<number | null>(null)
+  const lastSingleTouchPoint = useRef<TouchPoint | null>(null)
+  const touchPointersRef = useRef<Map<number, TouchPoint>>(new Map())
+  const gestureStartCenter = useRef<TouchPoint | null>(null)
+  const gestureStartDistance = useRef<number | null>(null)
+  const gestureMode = useRef<TouchGestureMode>('undecided')
+  const hasHandledPageSwipe = useRef(false)
   const isPanning = useRef(false)
   
   const { 
@@ -29,6 +66,41 @@ const MainCanvas: React.FC = () => {
     backgroundType
   } = useCanvasStore()
   const currentPageId = useUIStore((state) => state.currentPageId)
+  const currentPageIdRef = useRef<string | null>(currentPageId)
+
+  useEffect(() => {
+    currentPageIdRef.current = currentPageId
+  }, [currentPageId])
+
+  const navigateSiblingPage = useCallback(async (direction: 'next' | 'previous') => {
+    const pageId = currentPageIdRef.current
+    if (!pageId) return
+
+    const { data: currentPage, error: currentPageError } = await supabase
+      .from('pages')
+      .select('id, node_id')
+      .eq('id', pageId)
+      .single()
+
+    if (currentPageError || !currentPage) return
+
+    const { data: pages, error: pagesError } = await supabase
+      .from('pages')
+      .select('id')
+      .eq('node_id', currentPage.node_id)
+      .order('sort_order', { ascending: true })
+
+    if (pagesError || !pages) return
+
+    const currentIndex = pages.findIndex((page) => page.id === pageId)
+    if (currentIndex < 0) return
+
+    const targetIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1
+    const targetPage = pages[targetIndex]
+    if (!targetPage) return
+
+    useUIStore.getState().setCurrentPageId(targetPage.id)
+  }, [])
 
   // Function to set canvas background pattern
   const updateBackground = useCallback(() => {
@@ -91,23 +163,34 @@ const MainCanvas: React.FC = () => {
       height: containerRef.current.clientHeight,
       backgroundColor: '#ffffff',
       isDrawingMode: true,
+      enablePointerEvents: true,
       stopContextMenu: true,
     })
 
     fabricRef.current = canvas
 
-    const handleResize = () => {
-      if (containerRef.current) {
-        canvas.setDimensions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        })
-      }
+    const syncCanvasSize = () => {
+      const container = containerRef.current
+      if (!container) return
+
+      canvas.setDimensions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      })
+      canvas.calcOffset()
+      canvas.requestRenderAll()
     }
 
+    const handleResize = () => syncCanvasSize()
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(syncCanvasSize)
+    })
+
+    resizeObserver.observe(containerRef.current)
     window.addEventListener('resize', handleResize)
 
     return () => {
+      resizeObserver.disconnect()
       window.removeEventListener('resize', handleResize)
       canvas.dispose()
     }
@@ -118,9 +201,184 @@ const MainCanvas: React.FC = () => {
     const canvas = fabricRef.current
     if (!canvas) return
 
+    const preventCanvasPointerInput = (event: PointerEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+    }
+
+    const updateTouchPointer = (event: PointerEvent) => {
+      touchPointersRef.current.set(event.pointerId, {
+        x: event.clientX,
+        y: event.clientY,
+      })
+    }
+
+    const getActiveTouchPoints = () => Array.from(touchPointersRef.current.values()).slice(0, 2)
+
+    const resetTouchGesture = () => {
+      lastTouchDistance.current = null
+      gestureStartCenter.current = null
+      gestureStartDistance.current = null
+      gestureMode.current = 'undecided'
+      hasHandledPageSwipe.current = false
+    }
+
+    const panCanvasByTouch = (event: PointerEvent) => {
+      const currentPoint = { x: event.clientX, y: event.clientY }
+      const previousPoint = lastSingleTouchPoint.current
+
+      if (previousPoint) {
+        const viewportTransform = canvas.viewportTransform
+        if (viewportTransform) {
+          viewportTransform[4] += currentPoint.x - previousPoint.x
+          viewportTransform[5] += currentPoint.y - previousPoint.y
+          canvas.requestRenderAll()
+        }
+      }
+
+      lastSingleTouchPoint.current = currentPoint
+      isPanning.current = true
+    }
+
+    const handleTouchZoom = (event: PointerEvent) => {
+      updateTouchPointer(event)
+      const points = getActiveTouchPoints()
+      const distance = getTouchDistance(points)
+      if (!distance) return
+
+      const currentCenter = getTouchCenter(points)
+      if (!gestureStartCenter.current || !gestureStartDistance.current) {
+        gestureStartCenter.current = currentCenter
+        gestureStartDistance.current = distance
+      }
+
+      const startCenter = gestureStartCenter.current
+      const startDistance = gestureStartDistance.current
+      const distanceDelta = Math.abs(distance - startDistance)
+      const centerDeltaX = currentCenter.x - startCenter.x
+      const centerDeltaY = currentCenter.y - startCenter.y
+
+      if (gestureMode.current === 'undecided') {
+        if (distanceDelta >= ZOOM_DISTANCE_THRESHOLD) {
+          gestureMode.current = 'zoom'
+        } else if (
+          Math.abs(centerDeltaX) >= SWIPE_DISTANCE_THRESHOLD &&
+          Math.abs(centerDeltaY) <= SWIPE_VERTICAL_TOLERANCE &&
+          distanceDelta <= SWIPE_MAX_DISTANCE_DELTA
+        ) {
+          gestureMode.current = 'page-swipe'
+        }
+      }
+
+      if (gestureMode.current === 'page-swipe') {
+        if (!hasHandledPageSwipe.current) {
+          hasHandledPageSwipe.current = true
+          void navigateSiblingPage(centerDeltaX < 0 ? 'next' : 'previous')
+        }
+        isPanning.current = true
+        return
+      }
+
+      if (gestureMode.current !== 'zoom') {
+        lastTouchDistance.current = distance
+        isPanning.current = true
+        return
+      }
+
+      const previousDistance = lastTouchDistance.current
+      const offset = containerRef.current?.getBoundingClientRect()
+
+      if (previousDistance && offset) {
+        let newZoom = canvas.getZoom() * (distance / previousDistance)
+        if (newZoom > 20) newZoom = 20
+        if (newZoom < 0.01) newZoom = 0.01
+
+        canvas.zoomToPoint({
+          x: currentCenter.x - offset.left,
+          y: currentCenter.y - offset.top,
+        }, newZoom)
+        setZoom(newZoom)
+      }
+
+      lastTouchDistance.current = distance
+      isPanning.current = true
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') {
+        updateTouchPointer(event)
+
+        if (touchPointersRef.current.size >= 2) {
+          lastSingleTouchPoint.current = null
+          resetTouchGesture()
+          handleTouchZoom(event)
+          isMouseDownRef.current = false
+          preventCanvasPointerInput(event)
+          return
+        }
+
+        lastSingleTouchPoint.current = { x: event.clientX, y: event.clientY }
+        isMouseDownRef.current = false
+        preventCanvasPointerInput(event)
+        return
+      }
+
+      const { activeTool } = useCanvasStore.getState()
+      if (!requiresStylusInput(activeTool) || isStylusInput(event)) return
+
+      isMouseDownRef.current = false
+      preventCanvasPointerInput(event)
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !touchPointersRef.current.has(event.pointerId)) return
+      updateTouchPointer(event)
+
+      if (touchPointersRef.current.size >= 2) {
+        lastSingleTouchPoint.current = null
+        handleTouchZoom(event)
+        isMouseDownRef.current = false
+        preventCanvasPointerInput(event)
+      } else {
+        panCanvasByTouch(event)
+        isMouseDownRef.current = false
+        preventCanvasPointerInput(event)
+      }
+    }
+
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+
+      touchPointersRef.current.delete(event.pointerId)
+      if (touchPointersRef.current.size < 2) {
+        isPanning.current = false
+        resetTouchGesture()
+      }
+      if (touchPointersRef.current.size === 1) {
+        const remainingPoint = Array.from(touchPointersRef.current.values())[0]
+        lastSingleTouchPoint.current = remainingPoint
+      } else {
+        lastSingleTouchPoint.current = null
+      }
+      if (touchPointersRef.current.size > 0) {
+        preventCanvasPointerInput(event)
+      }
+    }
+
+    const upperCanvasEl = (canvas as any).upperCanvasEl as HTMLCanvasElement
+    const previousTouchAction = upperCanvasEl.style.touchAction
+    upperCanvasEl.style.touchAction = 'none'
+    upperCanvasEl.addEventListener('pointerdown', handlePointerDown, true)
+    upperCanvasEl.addEventListener('pointermove', handlePointerMove, true)
+    upperCanvasEl.addEventListener('pointerup', handlePointerEnd, true)
+    upperCanvasEl.addEventListener('pointercancel', handlePointerEnd, true)
+
     const handleMouseDown = (opt: fabric.IEvent) => {
-      const isPenMode = useCanvasStore.getState().isPenMode
-      const pointerType = (opt.e as any).pointerType || 'mouse'
+      if (requiresStylusInput(activeTool) && !isStylusInput(opt.e)) {
+        isMouseDownRef.current = false
+        return
+      }
       
       // Multitouch check (Zoom/Pan)
       const touches = (opt.e as any).touches
@@ -133,8 +391,6 @@ const MainCanvas: React.FC = () => {
         lastTouchDistance.current = dist
         return
       }
-
-      if (isPenMode && pointerType === 'touch') return
 
       isMouseDownRef.current = true
       const pointer = canvas.getPointer(opt.e)
@@ -209,6 +465,7 @@ const MainCanvas: React.FC = () => {
 
       const isActuallyDown = isMouseDownRef.current || ((opt.e as any).buttons > 0)
       if (!isActuallyDown) return
+      if (requiresStylusInput(activeTool) && !isStylusInput(opt.e)) return
 
       const pointer = canvas.getPointer(opt.e)
 
@@ -235,9 +492,14 @@ const MainCanvas: React.FC = () => {
       }
     }
 
-    const handleMouseUp = () => {
+    const handleMouseUp = (opt: fabric.IEvent) => {
       isPanning.current = false
       lastTouchDistance.current = null
+
+      if (requiresStylusInput(activeTool) && !isStylusInput(opt.e)) {
+        isMouseDownRef.current = false
+        return
+      }
 
       if (activeTool === 'rectEraser') {
         const rect = eraserRectRef.current
@@ -269,11 +531,16 @@ const MainCanvas: React.FC = () => {
     canvas.on('mouse:up', handleMouseUp)
 
     return () => {
+      upperCanvasEl.removeEventListener('pointerdown', handlePointerDown, true)
+      upperCanvasEl.removeEventListener('pointermove', handlePointerMove, true)
+      upperCanvasEl.removeEventListener('pointerup', handlePointerEnd, true)
+      upperCanvasEl.removeEventListener('pointercancel', handlePointerEnd, true)
+      upperCanvasEl.style.touchAction = previousTouchAction
       canvas.off('mouse:down', handleMouseDown)
       canvas.off('mouse:move', handleMouseMove)
       canvas.off('mouse:up', handleMouseUp)
     }
-  }, [activeTool])
+  }, [activeTool, navigateSiblingPage])
 
   // 3. Wheel event (Stable)
   useEffect(() => {

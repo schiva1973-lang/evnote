@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useUIStore } from '@/store/useUIStore'
 import { Node, Page } from '@/types'
@@ -22,23 +22,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from '@/components/ui/input'
-import { useSortable, SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import { useSortable, SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  DragEndEvent
-} from '@dnd-kit/core'
-import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 
 interface TreeNodeProps {
   node: Node
   allNodes: Node[]
   depth: number
+  refreshKey: number
   onUpdate: () => void
 }
 
@@ -49,6 +40,7 @@ const PageItem: React.FC<{
   isSelected: boolean;
   onSelect: (id: string) => void;
   onEdit: (page: Page) => void;
+  onCreatePage: () => void;
   onDelete: (id: string) => void;
   isEditing: boolean;
   editedTitle: string;
@@ -57,8 +49,9 @@ const PageItem: React.FC<{
   onCancelEdit: () => void;
 }> = ({ 
   page, depth, isSelected, onSelect, onEdit, onDelete, 
-  isEditing, editedTitle, onTitleChange, onUpdateTitle, onCancelEdit 
+  onCreatePage, isEditing, editedTitle, onTitleChange, onUpdateTitle, onCancelEdit 
 }) => {
+  const inputRef = useRef<HTMLInputElement>(null)
   const {
     attributes,
     listeners,
@@ -66,13 +59,29 @@ const PageItem: React.FC<{
     transform,
     transition,
     isDragging
-  } = useSortable({ id: page.id })
+  } = useSortable({
+    id: `page:${page.id}`,
+    data: {
+      type: 'page',
+      pageId: page.id,
+      nodeId: page.node_id,
+    },
+  })
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
   }
+
+  useEffect(() => {
+    if (!isEditing) return
+
+    requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    })
+  }, [isEditing])
 
   return (
     <div
@@ -86,7 +95,13 @@ const PageItem: React.FC<{
       style={{ ...style, paddingLeft: `${(depth + 1) * 12 + 8}px` }}
       onClick={() => onSelect(page.id)}
     >
-      <div {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing p-1 opacity-0 group-hover/page:opacity-50 hover:opacity-100">
+      <div
+        {...attributes}
+        {...listeners}
+        className="cursor-grab active:cursor-grabbing p-1 touch-none select-none opacity-0 group-hover/page:opacity-50 hover:opacity-100"
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
         <GripVertical className="h-3 w-3" />
       </div>
 
@@ -97,6 +112,7 @@ const PageItem: React.FC<{
       
       {isEditing ? (
         <Input
+          ref={inputRef}
           className="flex-1 h-6 px-1 bg-transparent border-none outline-none text-sm focus-visible:ring-1"
           value={editedTitle}
           onChange={(e) => onTitleChange(e.target.value)}
@@ -119,17 +135,28 @@ const PageItem: React.FC<{
             size="icon" 
             className="h-6 w-6 opacity-0 group-hover/page:opacity-100 shrink-0"
             onClick={(e) => e.stopPropagation()}
-          >
-            <MoreVertical className="h-3 w-3" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-32">
+        >
+          <MoreVertical className="h-3 w-3" />
+        </Button>
+      </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-32"
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
           <DropdownMenuItem onClick={(e) => {
             e.stopPropagation()
             onEdit(page)
           }}>
             <Edit2 className="mr-2 h-3 w-3" />
             <span>이름 변경</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={(e) => {
+            e.stopPropagation()
+            onCreatePage()
+          }}>
+            <Plus className="mr-2 h-3 w-3" />
+            <span>페이지 추가</span>
           </DropdownMenuItem>
           <DropdownMenuItem 
             className="text-destructive focus:text-destructive"
@@ -147,21 +174,17 @@ const PageItem: React.FC<{
   )
 }
 
-const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) => {
+const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, refreshKey, onUpdate }) => {
   const [isExpanded, setIsExpanded] = useState(true)
   const [pages, setPages] = useState<Page[]>([])
   const [isEditingNode, setIsEditingNode] = useState(false)
   const [editedNodeName, setEditedNodeName] = useState(node.name)
+  const nodeInputRef = useRef<HTMLInputElement>(null)
   
   const [editingPageId, setEditingPageId] = useState<string | null>(null)
   const [editedPageTitle, setEditedPageTitle] = useState('')
 
   const { currentNodeId, setCurrentNodeId, currentPageId, setCurrentPageId } = useUIStore()
-
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  )
 
   const {
     attributes,
@@ -170,7 +193,14 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
     transform,
     transition,
     isDragging
-  } = useSortable({ id: node.id })
+  } = useSortable({
+    id: `node:${node.id}`,
+    data: {
+      type: 'node',
+      nodeId: node.id,
+      parentNodeId: node.parent_node_id,
+    },
+  })
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -179,11 +209,38 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
     opacity: isDragging ? 0.5 : 1,
   }
 
+  const isAncestorOfCurrentNode = () => {
+    if (!currentNodeId || currentNodeId === node.id) return currentNodeId === node.id
+
+    let parentNodeId = allNodes.find((candidate) => candidate.id === currentNodeId)?.parent_node_id
+    while (parentNodeId) {
+      if (parentNodeId === node.id) return true
+      parentNodeId = allNodes.find((candidate) => candidate.id === parentNodeId)?.parent_node_id
+    }
+
+    return false
+  }
+
   useEffect(() => {
     if (isExpanded) {
       fetchPages()
     }
-  }, [isExpanded])
+  }, [isExpanded, refreshKey])
+
+  useEffect(() => {
+    if (isAncestorOfCurrentNode()) {
+      setIsExpanded(true)
+    }
+  }, [currentNodeId, allNodes, node.id])
+
+  useEffect(() => {
+    if (!isEditingNode) return
+
+    requestAnimationFrame(() => {
+      nodeInputRef.current?.focus()
+      nodeInputRef.current?.select()
+    })
+  }, [isEditingNode])
 
   const fetchPages = async () => {
     const { data, error } = await supabase
@@ -194,30 +251,6 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
     
     if (!error && data) {
       setPages(data)
-    }
-  }
-
-  const handleDragEndPage = async (event: DragEndEvent) => {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
-
-    const oldIndex = pages.findIndex((p) => p.id === active.id)
-    const newIndex = pages.findIndex((p) => p.id === over.id)
-
-    const newPages = arrayMove(pages, oldIndex, newIndex)
-    setPages(newPages)
-
-    // Update sort_order in database
-    const updates = newPages.map((page, index) => ({
-      id: page.id,
-      sort_order: index,
-    }))
-
-    for (const update of updates) {
-      await supabase
-        .from('pages')
-        .update({ sort_order: update.sort_order })
-        .eq('id', update.id)
     }
   }
 
@@ -313,9 +346,16 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
         onClick={() => {
           setIsExpanded(!isExpanded)
           setCurrentNodeId(node.id)
+          setCurrentPageId(null)
         }}
       >
-        <div {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing p-1 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+        <div
+          {...attributes}
+          {...listeners}
+          className="cursor-grab active:cursor-grabbing p-1 touch-none select-none opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <GripVertical className="h-3 w-3" />
         </div>
 
@@ -329,6 +369,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
         
         {isEditingNode ? (
           <Input
+            ref={nodeInputRef}
             className="flex-1 h-6 px-1 bg-transparent border-none outline-none text-sm focus-visible:ring-1"
             value={editedNodeName}
             onChange={(e) => setEditedNodeName(e.target.value)}
@@ -355,11 +396,15 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
               <MoreVertical className="h-3 w-3" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-32">
+          <DropdownMenuContent
+            align="end"
+            className="w-32"
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
             <DropdownMenuItem onClick={(e) => {
               e.stopPropagation()
-              setIsEditingNode(true)
               setEditedNodeName(node.name)
+              setTimeout(() => setIsEditingNode(true), 0)
             }}>
               <Edit2 className="mr-2 h-3 w-3" />
               <span>이름 변경</span>
@@ -412,7 +457,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
       {isExpanded && (
         <div className="space-y-0.5">
           <SortableContext 
-            items={childNodes.map(n => n.id)} 
+            items={childNodes.map(n => `node:${n.id}`)} 
             strategy={verticalListSortingStrategy}
           >
             {childNodes.map(child => (
@@ -421,41 +466,40 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, depth, onUpdate }) 
                 node={child} 
                 allNodes={allNodes} 
                 depth={depth + 1} 
+                refreshKey={refreshKey}
                 onUpdate={onUpdate}
               />
             ))}
           </SortableContext>
           
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={handleDragEndPage}
+          <SortableContext
+            items={pages.map(p => `page:${p.id}`)}
+            strategy={verticalListSortingStrategy}
           >
-            <SortableContext 
-              items={pages.map(p => p.id)} 
-              strategy={verticalListSortingStrategy}
-            >
-              {pages.map(page => (
-                <PageItem
-                  key={page.id}
-                  page={page}
-                  depth={depth}
-                  isSelected={currentPageId === page.id}
-                  onSelect={setCurrentPageId}
-                  onEdit={(p) => {
-                    setEditingPageId(p.id)
-                    setEditedPageTitle(p.title)
-                  }}
-                  onDelete={handleDeletePage}
-                  isEditing={editingPageId === page.id}
-                  editedTitle={editedPageTitle}
-                  onTitleChange={setEditedPageTitle}
-                  onUpdateTitle={handleUpdatePage}
-                  onCancelEdit={() => setEditingPageId(null)}
-                />
-              ))}
-            </SortableContext>
-          </DndContext>
+            {pages.map(page => (
+              <PageItem
+                key={page.id}
+                page={page}
+                depth={depth}
+                isSelected={currentPageId === page.id}
+                onSelect={(pageId) => {
+                  setCurrentNodeId(page.node_id)
+                  setCurrentPageId(pageId)
+                }}
+                onEdit={(p) => {
+                  setEditedPageTitle(p.title)
+                  setTimeout(() => setEditingPageId(p.id), 0)
+                }}
+                onCreatePage={() => handleCreatePage()}
+                onDelete={handleDeletePage}
+                isEditing={editingPageId === page.id}
+                editedTitle={editedPageTitle}
+                onTitleChange={setEditedPageTitle}
+                onUpdateTitle={handleUpdatePage}
+                onCancelEdit={() => setEditingPageId(null)}
+              />
+            ))}
+          </SortableContext>
         </div>
       )}
     </div>

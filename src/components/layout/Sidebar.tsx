@@ -132,11 +132,11 @@ const Sidebar: React.FC = () => {
               <Plus className="h-4 w-4" />
             </Button>
           </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
+          <DialogContent className="max-w-md border bg-white text-foreground shadow-2xl">
+            <DialogHeader className="border-b pb-4">
               <DialogTitle>새 노트북 생성</DialogTitle>
             </DialogHeader>
-            <form onSubmit={handleCreateNotebook} className="space-y-4 pt-4">
+            <form onSubmit={handleCreateNotebook} className="space-y-5 pt-2">
               <div className="space-y-2">
                 <Label htmlFor="name">노트북 이름</Label>
                 <Input 
@@ -159,7 +159,7 @@ const Sidebar: React.FC = () => {
                   </SelectContent>
                 </Select>
               </div>
-              <DialogFooter>
+              <DialogFooter className="border-t pt-4">
                 <Button type="submit" disabled={isCreating}>
                   {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   생성하기

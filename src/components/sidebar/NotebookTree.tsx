@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { Node } from '@/types'
+import { useUIStore } from '@/store/useUIStore'
 import TreeNode from './TreeNode'
 import { Loader2, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -23,6 +24,8 @@ import {
 const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
   const [nodes, setNodes] = useState<Node[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [pageRefreshKey, setPageRefreshKey] = useState(0)
+  const { currentPageId, setCurrentNodeId } = useUIStore()
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -38,6 +41,24 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
   useEffect(() => {
     fetchNodes()
   }, [notebookId])
+
+  useEffect(() => {
+    const syncCurrentPageNode = async () => {
+      if (!currentPageId) return
+
+      const { data, error } = await supabase
+        .from('pages')
+        .select('node_id')
+        .eq('id', currentPageId)
+        .single()
+
+      if (!error && data?.node_id) {
+        setCurrentNodeId(data.node_id)
+      }
+    }
+
+    syncCurrentPageNode()
+  }, [currentPageId, setCurrentNodeId])
 
   const fetchNodes = async () => {
     setIsLoading(true)
@@ -69,16 +90,26 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
     const { active, over } = event
     if (!over || active.id === over.id) return
 
-    const activeNode = nodes.find(n => n.id === active.id)
-    const overNode = nodes.find(n => n.id === over.id)
+    const activeData = active.data.current as any
+    const overData = over.data.current as any
+
+    if (activeData?.type === 'page') {
+      await handlePageDragEnd(activeData, overData)
+      return
+    }
+
+    if (activeData?.type !== 'node' || overData?.type !== 'node') return
+
+    const activeNode = nodes.find(n => n.id === activeData.nodeId)
+    const overNode = nodes.find(n => n.id === overData.nodeId)
     
     if (!activeNode || !overNode) return
 
     // Only allow sorting within the same parent
     if (activeNode.parent_node_id !== overNode.parent_node_id) return
 
-    const oldIndex = nodes.findIndex((n) => n.id === active.id)
-    const newIndex = nodes.findIndex((n) => n.id === over.id)
+    const oldIndex = nodes.findIndex((n) => n.id === activeData.nodeId)
+    const newIndex = nodes.findIndex((n) => n.id === overData.nodeId)
 
     const newNodes = arrayMove(nodes, oldIndex, newIndex)
     setNodes(newNodes)
@@ -97,6 +128,84 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
         .update({ sort_order: update.sort_order })
         .eq('id', update.id)
     }
+  }
+
+  const handlePageDragEnd = async (
+    activeData: { pageId?: string; nodeId?: string },
+    overData: { type?: string; pageId?: string; nodeId?: string } | undefined
+  ) => {
+    if (!activeData.pageId || !activeData.nodeId || !overData) return
+
+    if (overData.type === 'page' && overData.nodeId === activeData.nodeId && overData.pageId) {
+      await reorderPagesWithinNode(activeData.nodeId, activeData.pageId, overData.pageId)
+      return
+    }
+
+    if (overData.type === 'node' && overData.nodeId && overData.nodeId !== activeData.nodeId) {
+      await movePageToNode(activeData.pageId, activeData.nodeId, overData.nodeId)
+    }
+  }
+
+  const reorderPagesWithinNode = async (nodeId: string, pageId: string, overPageId: string) => {
+    const { data, error } = await supabase
+      .from('pages')
+      .select('id')
+      .eq('node_id', nodeId)
+      .order('sort_order', { ascending: true })
+
+    if (error || !data) return
+
+    const oldIndex = data.findIndex((page) => page.id === pageId)
+    const newIndex = data.findIndex((page) => page.id === overPageId)
+    if (oldIndex < 0 || newIndex < 0) return
+
+    const reorderedPages = arrayMove(data, oldIndex, newIndex)
+    for (const [index, page] of reorderedPages.entries()) {
+      await supabase
+        .from('pages')
+        .update({ sort_order: index })
+        .eq('id', page.id)
+    }
+
+    setPageRefreshKey((key) => key + 1)
+  }
+
+  const movePageToNode = async (pageId: string, sourceNodeId: string, targetNodeId: string) => {
+    const { data: targetPages, error: targetPagesError } = await supabase
+      .from('pages')
+      .select('id')
+      .eq('node_id', targetNodeId)
+      .order('sort_order', { ascending: true })
+
+    if (targetPagesError) return
+
+    const { error: moveError } = await supabase
+      .from('pages')
+      .update({
+        node_id: targetNodeId,
+        sort_order: targetPages?.length ?? 0,
+      })
+      .eq('id', pageId)
+
+    if (moveError) return
+
+    const { data: sourcePages } = await supabase
+      .from('pages')
+      .select('id')
+      .eq('node_id', sourceNodeId)
+      .order('sort_order', { ascending: true })
+
+    for (const [index, page] of (sourcePages ?? []).entries()) {
+      await supabase
+        .from('pages')
+        .update({ sort_order: index })
+        .eq('id', page.id)
+    }
+
+    if (currentPageId === pageId) {
+      setCurrentNodeId(targetNodeId)
+    }
+    setPageRefreshKey((key) => key + 1)
   }
 
   if (isLoading) {
@@ -130,7 +239,7 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
           onDragEnd={handleDragEnd}
         >
           <SortableContext
-            items={rootNodes.map(n => n.id)}
+            items={rootNodes.map(n => `node:${n.id}`)}
             strategy={verticalListSortingStrategy}
           >
             {rootNodes.map(node => (
@@ -139,6 +248,7 @@ const NotebookTree: React.FC<{ notebookId: string }> = ({ notebookId }) => {
                 node={node} 
                 allNodes={nodes} 
                 depth={0} 
+                refreshKey={pageRefreshKey}
                 onUpdate={fetchNodes}
               />
             ))}
