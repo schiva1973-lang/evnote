@@ -1,0 +1,12 @@
+# Shell command도 자동 허용. 리다이렉션(>, >> 등) 프롬프트까지 줄이려면 allowRedirection 포함.
+[[rule]]
+toolName = "run_shell_command"
+decision = "allow"
+priority = 999
+allowRedirection = true
+
+# 그 외 모든 도구/에이전트 호출 자동 허용
+[[rule]]
+toolName = "*"
+decision = "allow"
+priority = 998
